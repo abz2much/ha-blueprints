@@ -1,0 +1,146 @@
+blueprint:
+  name: Reload Integration When Entity Gets Stuck Unavailable
+  description: >
+    Watches one entity (built with the Eufy Security integration's camera
+    disconnects in mind, but works for any entity backed by a config entry).
+    When it goes "unavailable", or sits outside a list of healthy states for
+    too long, this reloads the entity's integration config entry and waits.
+    If that didn't fix it, it notifies you instead of leaving you to
+    discover a dead camera feed yourself.
+
+    Written after the "6-hour timer" approach (blind periodic reloads) caused
+    false positives, reloading a perfectly healthy integration and
+    interrupting things like an in-progress recording. This only reloads when
+    something is actually wrong.
+
+    Why this happens with Eufy specifically: the Eufy Security integration
+    (fuatakgun/eufy_security) doesn't talk to an official local API, it goes
+    through a companion WebSocket bridge (bropat/eufy-security-ws) that holds
+    a persistent connection to Eufy's own service. That connection is known
+    to drop on its own, entities then sit "unavailable" until something
+    reloads it. See the README in this folder for sources.
+
+    Requires:
+      1. Nothing beyond stock Home Assistant for the reload/notify logic
+         itself.
+      2. mobile_app (or any other notify target) set up if you want the
+         failure notification.
+
+  domain: automation
+  source_url: https://github.com/abz2much/ha-blueprints/blob/main/eufy-security-reload/reload_entity_when_unavailable.yaml
+
+  input:
+    target_entity:
+      name: Entity to watch
+      description: >
+        The entity to monitor and, if it's stuck, reload the integration
+        for. For Eufy, a camera entity works well, since it changes state
+        often enough to make "stuck" detectable.
+      selector:
+        entity:
+
+    healthy_states:
+      name: Healthy states
+      description: >
+        Comma-separated list of states that count as "working fine". Outside
+        this list for longer than the threshold below counts as stuck. The
+        default suits a camera entity, change it if you're watching
+        something else.
+      default: "idle,streaming,recording"
+      selector:
+        text:
+
+    stuck_for_minutes:
+      name: Stuck threshold (minutes)
+      description: >
+        How long the entity has to sit outside the healthy states list
+        before this treats it as stuck (as opposed to a normal brief
+        transition).
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: minutes
+
+    recovery_wait_seconds:
+      name: Wait after reload (seconds)
+      description: How long to wait after reloading before checking if it worked.
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 300
+          unit_of_measurement: seconds
+
+    notify_target:
+      name: Notify target (optional)
+      description: >
+        A notify action name without the "notify." prefix, e.g.
+        "mobile_app_your_phone". Leave blank to skip notifications, the
+        automation will still reload silently.
+      default: ""
+      selector:
+        text:
+
+    notify_title:
+      name: Notification title
+      default: "Integration reload alert"
+      selector:
+        text:
+
+variables:
+  target_entity: !input target_entity
+  healthy_states_raw: !input healthy_states
+  notify_target: !input notify_target
+  notify_title: !input notify_title
+
+triggers:
+  - trigger: state
+    entity_id: !input target_entity
+    to: "unavailable"
+    id: went_unavailable
+  - trigger: state
+    entity_id: !input target_entity
+    to: null
+    for:
+      minutes: !input stuck_for_minutes
+    id: stuck_state
+
+conditions:
+  - condition: or
+    conditions:
+      - condition: trigger
+        id: went_unavailable
+      - condition: and
+        conditions:
+          - condition: trigger
+            id: stuck_state
+          - condition: template
+            value_template: "{{ not is_state(target_entity, healthy_states_raw.split(',') | map('trim') | list) }}"
+
+actions:
+  - action: homeassistant.reload_config_entry
+    continue_on_error: true
+    target:
+      entity_id: !input target_entity
+
+  - delay:
+      seconds: !input recovery_wait_seconds
+
+  - if:
+      - condition: template
+        value_template: "{{ not is_state(target_entity, healthy_states_raw.split(',') | map('trim') | list) }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ notify_target not in ['', 'none', none] }}"
+        then:
+          - action: "notify.{{ notify_target }}"
+            data:
+              title: "{{ notify_title }}"
+              message: >-
+                {{ target_entity }} reloaded but is still not in a healthy
+                state. It may need a manual restart or a closer look.
+
+mode: single
