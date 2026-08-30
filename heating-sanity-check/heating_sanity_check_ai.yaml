@@ -1,0 +1,290 @@
+blueprint:
+  name: Heating Sanity Check (AI advisor)
+  description: >
+    When a thermostat starts actively heating, this checks outdoor temperature
+    and a window sensor against a cheap pre-filter, then asks an external
+    "advisor" endpoint (e.g. an n8n workflow calling an LLM) whether the
+    heating actually makes sense right now. If the advisor says no, it asks up
+    to two people to approve dropping the setpoint via a mobile notification
+    with Approve/Dismiss actions. If nobody responds within the timeout, it
+    falls back to a spoken announcement instead of silently doing nothing.
+
+    Requires, before importing:
+      1. A `rest_command:` action in configuration.yaml that POSTs to your own
+         advisor endpoint and returns JSON shaped like
+         {"decision": "TURN_OFF" | "OK", "reason": "..."}. See the README in
+         this folder for the exact contract and an example webhook shape.
+      2. An input_datetime helper used purely as a cooldown timestamp, so this
+         doesn't re-ask on every heating cycle (Settings > Devices & Services
+         > Helpers > Create Helper > Date and/or time).
+      3. mobile_app set up for anyone who should get the approve/dismiss push.
+
+    The trigger, notification, and fallback logic here work as shown. The
+    "advisor" itself (whatever decides TURN_OFF vs OK) is up to you to build,
+    it could be a webhook to any LLM, a simple rules engine, or a static
+    "always OK" endpoint while you're still setting it up.
+
+    No external advisor to set up? Use the sibling blueprint
+    `heating_sanity_check_rule_based.yaml` in this same folder instead, it
+    does the temperature/window check locally with no dependencies.
+
+  domain: automation
+  source_url: https://github.com/REPLACE_WITH_YOUR_USERNAME/REPLACE_WITH_REPO/blob/main/heating-sanity-check/heating_sanity_check_ai.yaml
+
+  input:
+    climate_entity:
+      name: Thermostat
+      description: The climate entity to watch and, if approved, adjust.
+      selector:
+        entity:
+          domain: climate
+
+    zone_label:
+      name: Zone label
+      description: >
+        Human-readable label sent to the advisor and used in the spoken
+        announcement, e.g. "downstairs, living room".
+      default: "this zone"
+      selector:
+        text:
+
+    windows_entity:
+      name: Windows sensor
+      description: >
+        A binary_sensor (a single sensor or a group/template aggregate) that
+        is "on" when relevant windows are open.
+      selector:
+        entity:
+          domain: binary_sensor
+
+    weather_entity:
+      name: Weather entity
+      default: weather.home
+      selector:
+        entity:
+          domain: weather
+
+    outdoor_temp_threshold:
+      name: Outdoor temperature pre-filter (°C)
+      description: >
+        Above this outdoor temperature, always ask the advisor. This is a
+        cheap pre-filter so the advisor is only called for ambiguous cases,
+        not every ordinary heating cycle.
+      default: 16
+      selector:
+        number:
+          min: 0
+          max: 30
+          unit_of_measurement: "°C"
+
+    rest_command_action:
+      name: REST command name
+      description: >
+        The name portion of the rest_command action you configured, e.g. if
+        you defined `rest_command: heating_sanity_check:` in
+        configuration.yaml, enter "heating_sanity_check" here.
+      selector:
+        text:
+
+    cooldown_helper:
+      name: Cooldown helper
+      description: An input_datetime helper dedicated to this automation.
+      selector:
+        entity:
+          domain: input_datetime
+
+    cooldown_minutes:
+      name: Cooldown (minutes)
+      description: Minimum time between advisor checks for this zone.
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 180
+          unit_of_measurement: minutes
+
+    target_setpoint:
+      name: Fallback setpoint (°C)
+      description: Temperature to drop to if someone approves.
+      default: 18
+      selector:
+        number:
+          min: 10
+          max: 22
+          unit_of_measurement: "°C"
+
+    notify_target_1:
+      name: First person to notify
+      description: >
+        A notify action name without the "notify." prefix, e.g.
+        "mobile_app_your_phone".
+      selector:
+        text:
+
+    notify_target_2:
+      name: Second person to notify (optional)
+      description: >
+        Leave blank if only one person should be asked. Same format as
+        above.
+      default: ""
+      selector:
+        text:
+
+    approval_timeout_minutes:
+      name: Approval timeout (minutes)
+      description: How long to wait for a response before announcing instead.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: minutes
+
+    announcement_script:
+      name: Fallback announcement script
+      description: >
+        A script (without the "script." prefix) that accepts an
+        "announcement_text" field and speaks it, e.g. a
+        presence-based announcement router. Leave the default if you don't
+        have one, nothing will be announced and the automation just exits.
+      default: "none"
+      selector:
+        text:
+
+variables:
+  zone_label: !input zone_label
+  cooldown_helper: !input cooldown_helper
+  cooldown_minutes: !input cooldown_minutes
+  target_setpoint: !input target_setpoint
+  notify_target_1: !input notify_target_1
+  notify_target_2: !input notify_target_2
+  announcement_script: !input announcement_script
+  climate_entity: !input climate_entity
+  windows_entity: !input windows_entity
+  weather_entity: !input weather_entity
+  rest_command_action: !input rest_command_action
+
+triggers:
+  - trigger: state
+    entity_id: !input climate_entity
+    attribute: hvac_action
+    to: "heating"
+    for:
+      minutes: 2
+
+conditions:
+  - condition: or
+    conditions:
+      - condition: numeric_state
+        entity_id: !input weather_entity
+        attribute: temperature
+        above: !input outdoor_temp_threshold
+      - condition: state
+        entity_id: !input windows_entity
+        state: "on"
+  - condition: template
+    value_template: >
+      {{ state_attr(cooldown_helper, 'timestamp') is none or
+         now().timestamp() - state_attr(cooldown_helper, 'timestamp')
+         >= (cooldown_minutes | int) * 60 }}
+
+# NOTE: this blueprint templates the action/service name itself in three
+# places below (rest_command.*, notify.*, script.*). This is a documented,
+# supported Home Assistant pattern, not a workaround.
+actions:
+  - action: input_datetime.set_datetime
+    target:
+      entity_id: !input cooldown_helper
+    data:
+      timestamp: "{{ now().timestamp() }}"
+
+  - action: "rest_command.{{ rest_command_action }}"
+    data:
+      zone_label: "{{ zone_label }}"
+      current_temp: "{{ state_attr(climate_entity, 'current_temperature') }}"
+      target_temp: "{{ state_attr(climate_entity, 'temperature') }}"
+      outdoor_temp: "{{ state_attr(weather_entity, 'temperature') }}"
+      weather_condition: "{{ states(weather_entity) }}"
+      window_open: "{{ is_state(windows_entity, 'on') }}"
+    response_variable: advisor_response
+
+  - variables:
+      decision_text: >
+        {{ advisor_response['content']['decision']
+           if advisor_response is defined and advisor_response['status'] == 200
+           else 'OK' }}
+      reason_text: >
+        {{ advisor_response['content']['reason']
+           if advisor_response is defined and advisor_response['status'] == 200
+           else 'Could not reach the heating advisor, leaving things as they are.' }}
+
+  - if:
+      - condition: template
+        value_template: "{{ decision_text == 'TURN_OFF' }}"
+    then:
+      - action: "notify.{{ notify_target_1 }}"
+        data:
+          title: "{{ zone_label | title }} heating check"
+          message: "{{ reason_text }}"
+          data:
+            tag: "heating_sanity_{{ climate_entity }}"
+            actions:
+              - action: "APPROVE_DROP"
+                title: "Drop to {{ target_setpoint }}C"
+              - action: "DISMISS"
+                title: "Leave it"
+
+      - if:
+          - condition: template
+            value_template: "{{ notify_target_2 not in ['', 'none', none] }}"
+        then:
+          - action: "notify.{{ notify_target_2 }}"
+            data:
+              title: "{{ zone_label | title }} heating check"
+              message: "{{ reason_text }}"
+              data:
+                tag: "heating_sanity_{{ climate_entity }}"
+                actions:
+                  - action: "APPROVE_DROP"
+                    title: "Drop to {{ target_setpoint }}C"
+                  - action: "DISMISS"
+                    title: "Leave it"
+
+      - wait_for_trigger:
+          - trigger: event
+            event_type: mobile_app_notification_action
+            event_data:
+              action: "APPROVE_DROP"
+            id: "approved"
+          - trigger: event
+            event_type: mobile_app_notification_action
+            event_data:
+              action: "DISMISS"
+            id: "dismissed"
+        timeout:
+          minutes: !input approval_timeout_minutes
+
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ wait.trigger is not none and wait.trigger.id == 'approved' }}"
+            sequence:
+              - action: climate.set_temperature
+                target:
+                  entity_id: !input climate_entity
+                data:
+                  temperature: "{{ target_setpoint }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ not wait.completed and announcement_script not in ['none', ''] }}"
+            sequence:
+              - condition: state
+                entity_id: !input climate_entity
+                attribute: hvac_action
+                state: "heating"
+              - action: "script.{{ announcement_script }}"
+                data:
+                  announcement_text: "The {{ zone_label }} heating's on and probably shouldn't be. {{ reason_text }}"
+        default: []
+
+mode: single

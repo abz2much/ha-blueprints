@@ -1,0 +1,26 @@
+blueprint:
+  name: <Blueprint Name>
+  description: >
+    What this does, in a sentence or two. Mention any prerequisites right
+    here too (helpers, other integrations) since this text is what people
+    see in the HA import dialog before they commit to anything.
+  domain: automation
+  source_url: https://github.com/REPLACE/REPLACE/blob/main/<folder>/<blueprint-name>.yaml
+
+  input:
+    example_entity:
+      name: Example entity
+      description: What this is used for.
+      selector:
+        entity:
+          domain: sensor
+
+triggers:
+  - trigger: state
+    entity_id: !input example_entity
+
+conditions: []
+
+actions: []
+
+mode: single
