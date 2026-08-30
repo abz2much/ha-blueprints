@@ -29,7 +29,7 @@ blueprint:
     does the temperature/window check locally with no dependencies.
 
   domain: automation
-  source_url: https://github.com/REPLACE_WITH_YOUR_USERNAME/REPLACE_WITH_REPO/blob/main/heating-sanity-check/heating_sanity_check_ai.yaml
+  source_url: https://github.com/abz2much/ha-blueprints/blob/main/heating-sanity-check/heating_sanity_check_ai.yaml
 
   input:
     climate_entity:
