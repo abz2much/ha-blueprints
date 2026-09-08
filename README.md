@@ -10,6 +10,7 @@ into your own Home Assistant instance and adapt to your own entities.
 | --- | --- | --- |
 | [Heating Sanity Check](./heating-sanity-check/) | Catches heating running when it probably shouldn't be (mild outside, window open), asks for approval before dropping the setpoint, announces if nobody responds. Two variants: rule-based (no dependencies) and AI-advisor (calls out to your own LLM backend). | See folder README |
 | [Reload Integration When Entity Gets Stuck Unavailable](./eufy-security-reload/) | Built around Eufy Security's known WebSocket disconnects, reloads an entity's integration only when it's actually stuck unavailable, not on a blind timer, and notifies you if the reload didn't fix it. Works for any entity backed by a config entry. | See folder README |
+| [Solar-Aware Energy Cluster](./solar-aware-energy-cluster/) | Seven solar-aware behaviours sharing cooldowns: appliance auto-start on high export, overnight fallback starts on a low forecast, a peak-rate appliance warning, a nightly forecast announcement, a high-export utilisation announcement and a direct heating boost. | See folder README |
 
 More will be added here over time, requests welcome, see below.
 

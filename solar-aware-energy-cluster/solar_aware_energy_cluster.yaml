@@ -1,0 +1,659 @@
+blueprint:
+  name: Solar-Aware Energy Cluster
+  description: >
+    Reacts to solar export and generation across appliances, heating and
+    notifications. Seven behaviours, all running from one blueprint so their
+    cooldowns and once-a-day gates share state cleanly:
+
+      1. Auto-starts a washer/dishwasher (once a day) when grid export stays
+         high for a while.
+      2. Sends a nightly forecast summary for tomorrow's solar production.
+      3/4. Falls back to starting the washer/dishwasher late at night if
+         tomorrow's forecast is low and they're still loaded and ready.
+      5. Warns when an appliance starts on peak-rate, grid-imported power.
+      6. Announces sustained high export utilisation, optionally nudging a
+         heating boost if it's a bit cold.
+      7. Boosts heating directly when export/generation stays high for a
+         while.
+
+    Requires:
+      1. Three input_datetime helpers used purely as cooldown / once-a-day
+         timestamps (Settings > Devices & Services > Helpers > Create Helper
+         > Date and/or time) — one each for appliance auto-start, high-export
+         announcements and heating boost. One set per instance of this
+         blueprint.
+      2. select entities for the washer/dishwasher with a "run" (or your own)
+         option, if you want the auto-start/fallback-start behaviours.
+      3. Optional: a script that accepts an "announcement_text" field, for
+         spoken or pushed announcements. Leave the default to skip these.
+      4. Optional: a script to boost heating (e.g. for an hour). Leave the
+         default to skip both heating-boost behaviours.
+      5. Optional: a rest_command returning JSON with a content.text field,
+         for a richer nightly forecast summary. Leave the default and it
+         just reads a forecast sensor instead.
+
+  domain: automation
+  source_url: https://github.com/abz2much/ha-blueprints/blob/main/solar-aware-energy-cluster/solar_aware_energy_cluster.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+
+  input:
+    appliances:
+      name: Appliances
+      icon: mdi:washing-machine
+      input:
+        washer_power_sensor:
+          name: Washer power sensor
+          description: binary_sensor that's "on" while the washer is actually running.
+          selector:
+            entity:
+              domain: binary_sensor
+        washer_remote_control_sensor:
+          name: Washer ready-to-start sensor
+          description: binary_sensor that's "on" when the washer is loaded and ready to be started remotely.
+          selector:
+            entity:
+              domain: binary_sensor
+        washer_select:
+          name: Washer control entity
+          description: select entity used to start the washer.
+          selector:
+            entity:
+              domain: select
+        dryer_power_sensor:
+          name: Dryer power sensor
+          description: binary_sensor that's "on" while the dryer is actually running.
+          selector:
+            entity:
+              domain: binary_sensor
+        dishwasher_power_sensor:
+          name: Dishwasher power sensor
+          description: binary_sensor that's "on" while the dishwasher is actually running.
+          selector:
+            entity:
+              domain: binary_sensor
+        dishwasher_remote_control_sensor:
+          name: Dishwasher ready-to-start sensor
+          description: binary_sensor that's "on" when the dishwasher is loaded and ready to be started remotely.
+          selector:
+            entity:
+              domain: binary_sensor
+        dishwasher_select:
+          name: Dishwasher control entity
+          description: select entity used to start the dishwasher.
+          selector:
+            entity:
+              domain: select
+        run_option:
+          name: Appliance "start" option value
+          description: The option value that starts an appliance on the select entities above.
+          default: "run"
+          selector:
+            text:
+
+    solar_and_grid:
+      name: Solar & grid
+      icon: mdi:solar-power
+      input:
+        export_power_sensor:
+          name: Grid export power sensor
+          description: Watts currently exported to the grid. Drives appliance auto-start and the high-export-utilisation announcement.
+          selector:
+            entity:
+              domain: sensor
+        import_power_sensor:
+          name: Grid import power sensor
+          description: Watts currently imported from the grid. Used by the peak-rate warning.
+          selector:
+            entity:
+              domain: sensor
+        heating_export_power_sensor:
+          name: Export/generation sensor for heating boost
+          description: >
+            Watched for the direct heating-boost trigger. Can be the same
+            entity as the grid export sensor above, or a separate
+            inverter/generation reading.
+          selector:
+            entity:
+              domain: sensor
+        tomorrow_forecast_sensor:
+          name: Tomorrow's forecast sensor (kWh)
+          description: Numeric sensor forecasting tomorrow's solar production. Decides whether the overnight fallback starts are worth doing.
+          selector:
+            entity:
+              domain: sensor
+        forecast_announcement_sensor:
+          name: Tomorrow's forecast sensor (for announcement wording)
+          description: >
+            Read for the nightly announcement's fallback wording, only used
+            if the optional rest_command isn't set. Can be the same entity
+            as above.
+          selector:
+            entity:
+              domain: sensor
+        electricity_price_sensor:
+          name: Current electricity price
+          description: Compared against the peak-rate threshold below.
+          selector:
+            entity:
+              domain: [input_number, sensor]
+        someone_home_sensor:
+          name: Someone home sensor
+          description: binary_sensor that's "on" when anyone is home. Gates the high-export announcement and the direct heating-boost trigger.
+          selector:
+            entity:
+              domain: binary_sensor
+        peak_rate_persons:
+          name: People to check for the peak-rate warning
+          description: The peak-rate appliance warning only fires if at least one of these is home.
+          selector:
+            entity:
+              domain: person
+              multiple: true
+
+    heating:
+      name: Heating
+      icon: mdi:radiator
+      input:
+        thermostat:
+          name: Thermostat
+          selector:
+            entity:
+              domain: climate
+        heating_boost_script:
+          name: Heating boost script (optional)
+          description: >
+            A script (without the "script." prefix) that boosts the heating,
+            e.g. for an hour. Leave as "none" to skip both heating-boost
+            behaviours.
+          default: "none"
+          selector:
+            text:
+
+    announcements:
+      name: Announcements & notifications
+      icon: mdi:bullhorn-outline
+      input:
+        announcement_script:
+          name: Spoken/presence-based announcement script (optional)
+          description: >
+            A script (without the "script." prefix) that accepts an
+            "announcement_text" field, e.g. for a TTS announcement. Leave as
+            "none" to skip the forecast, peak-rate and utilisation
+            announcements (the nightly notify below still fires).
+          default: "none"
+          selector:
+            text:
+        notify_service:
+          name: Notify service for the nightly forecast
+          description: A notify action (without the "notify." prefix), e.g. "notify" or "mobile_app_yourphone".
+          default: "notify"
+          selector:
+            text:
+        forecast_rest_command:
+          name: Forecast comparison rest_command (optional)
+          description: >
+            A rest_command (without the "rest_command." prefix) returning
+            JSON with a content.text field, for a richer forecast summary.
+            Leave as "none" to just read the forecast sensor instead.
+          default: "none"
+          selector:
+            text:
+        forecast_extra_message:
+          name: Extra line for the forecast announcement (optional)
+          description: Appended after the forecast summary, e.g. a bedtime nudge. Leave blank for none.
+          default: ""
+          selector:
+            text:
+
+    thresholds:
+      name: Thresholds
+      icon: mdi:tune
+      collapsed: true
+      input:
+        export_threshold:
+          name: Export threshold (W)
+          description: Grid export level that counts as "high" for appliance auto-start and the utilisation announcement.
+          default: 1000
+          selector:
+            number:
+              min: 0
+              max: 10000
+              unit_of_measurement: W
+        appliance_start_duration:
+          name: Export duration before auto-start (minutes)
+          default: 5
+          selector:
+            number:
+              min: 1
+              max: 60
+              unit_of_measurement: minutes
+        utilisation_announce_duration:
+          name: Export duration before utilisation announcement (minutes)
+          default: 1
+          selector:
+            number:
+              min: 1
+              max: 60
+              unit_of_measurement: minutes
+        heating_export_threshold:
+          name: Export/generation threshold for heating boost (W)
+          default: 500
+          selector:
+            number:
+              min: 0
+              max: 10000
+              unit_of_measurement: W
+        heating_export_duration:
+          name: Duration before heating boost (minutes)
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 60
+              unit_of_measurement: minutes
+        low_forecast_threshold:
+          name: Low tomorrow-forecast threshold (kWh)
+          default: 6
+          selector:
+            number:
+              min: 0
+              max: 50
+              unit_of_measurement: kWh
+        peak_rate_price_threshold:
+          name: Peak-rate price threshold
+          description: Same unit as your electricity price sensor.
+          default: 0.28
+          selector:
+            number:
+              min: 0
+              max: 5
+              step: 0.01
+        peak_rate_import_threshold:
+          name: Grid import threshold for peak-rate warning (W)
+          default: 50
+          selector:
+            number:
+              min: 0
+              max: 5000
+              unit_of_measurement: W
+        heating_boost_min_temp_utilisation:
+          name: Max indoor temp to boost on utilisation announcement (°C)
+          default: 19
+          selector:
+            number:
+              min: 5
+              max: 25
+              unit_of_measurement: "°C"
+        heating_boost_min_temp_direct:
+          name: Max indoor temp to boost on direct heating trigger (°C)
+          default: 20
+          selector:
+            number:
+              min: 5
+              max: 25
+              unit_of_measurement: "°C"
+
+    timing:
+      name: Timing
+      icon: mdi:clock-outline
+      collapsed: true
+      input:
+        forecast_announcement_time:
+          name: Nightly forecast announcement time
+          default: "20:00:00"
+          selector:
+            time:
+        night_dishwasher_check_time:
+          name: Overnight dishwasher fallback check time
+          default: "22:30:00"
+          selector:
+            time:
+        night_dishwasher_delay:
+          name: Delay before overnight dishwasher fallback start
+          default:
+            hours: 3
+            minutes: 30
+            seconds: 0
+          selector:
+            duration:
+        night_washer_check_time:
+          name: Overnight washer fallback check time
+          default: "22:30:00"
+          selector:
+            time:
+        night_washer_delay:
+          name: Delay before overnight washer fallback start
+          default:
+            hours: 5
+            minutes: 0
+            seconds: 0
+          selector:
+            duration:
+
+    cooldowns:
+      name: Cooldown helpers
+      icon: mdi:timer-cog-outline
+      collapsed: true
+      input:
+        appliance_autostart_cooldown_helper:
+          name: Appliance auto-start "once a day" helper
+          description: input_datetime helper dedicated to this blueprint instance.
+          selector:
+            entity:
+              domain: input_datetime
+        export_announcement_cooldown_helper:
+          name: High-export announcement cooldown helper
+          selector:
+            entity:
+              domain: input_datetime
+        export_announcement_cooldown_minutes:
+          name: High-export announcement cooldown (minutes)
+          default: 180
+          selector:
+            number:
+              min: 5
+              max: 720
+              unit_of_measurement: minutes
+        heating_boost_cooldown_helper:
+          name: Heating boost cooldown helper
+          selector:
+            entity:
+              domain: input_datetime
+        heating_boost_cooldown_minutes:
+          name: Heating boost cooldown (minutes)
+          default: 60
+          selector:
+            number:
+              min: 5
+              max: 360
+              unit_of_measurement: minutes
+
+variables:
+  appliance_autostart_cooldown_helper: !input appliance_autostart_cooldown_helper
+  export_announcement_cooldown_helper: !input export_announcement_cooldown_helper
+  export_announcement_cooldown_minutes: !input export_announcement_cooldown_minutes
+  heating_boost_cooldown_helper: !input heating_boost_cooldown_helper
+  heating_boost_cooldown_minutes: !input heating_boost_cooldown_minutes
+  peak_rate_persons: !input peak_rate_persons
+  announcement_script: !input announcement_script
+  notify_service: !input notify_service
+  forecast_rest_command: !input forecast_rest_command
+  forecast_extra_message: !input forecast_extra_message
+  forecast_announcement_sensor: !input forecast_announcement_sensor
+  heating_boost_script: !input heating_boost_script
+  washer_remote_control_sensor: !input washer_remote_control_sensor
+  dishwasher_remote_control_sensor: !input dishwasher_remote_control_sensor
+  export_power_sensor: !input export_power_sensor
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input export_power_sensor
+    above: !input export_threshold
+    for:
+      minutes: !input appliance_start_duration
+    id: appliance_export
+    alias: High export above threshold (appliance auto-start)
+  - trigger: time
+    at: !input forecast_announcement_time
+    id: forecast_announcement
+    alias: Nightly forecast announcement time
+  - trigger: time
+    at: !input night_dishwasher_check_time
+    id: night_dishwasher
+    alias: Overnight dishwasher fallback check
+  - trigger: time
+    at: !input night_washer_check_time
+    id: night_washer
+    alias: Overnight washer fallback check
+  - trigger: state
+    entity_id: !input washer_power_sensor
+    to: "on"
+    id: peak_washer
+    alias: Washer powered on
+  - trigger: state
+    entity_id: !input dryer_power_sensor
+    to: "on"
+    id: peak_dryer
+    alias: Dryer powered on
+  - trigger: state
+    entity_id: !input dishwasher_power_sensor
+    to: "on"
+    id: peak_dishwasher
+    alias: Dishwasher powered on
+  - trigger: numeric_state
+    entity_id: !input export_power_sensor
+    above: !input export_threshold
+    for:
+      minutes: !input utilisation_announce_duration
+    id: high_export_utilization
+    alias: High export (utilisation announcement)
+  - trigger: numeric_state
+    entity_id: !input heating_export_power_sensor
+    above: !input heating_export_threshold
+    for:
+      minutes: !input heating_export_duration
+    id: heating_high_export
+    alias: High export/generation (direct heating boost)
+
+conditions: []
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: appliance_export
+          - condition: template
+            value_template: >
+              {{ states(appliance_autostart_cooldown_helper) in ['unknown', 'unavailable']
+                 or (states(appliance_autostart_cooldown_helper) | as_datetime).date() != now().date() }}
+        sequence:
+          - if:
+              - condition: state
+                entity_id: !input washer_remote_control_sensor
+                state: "on"
+            then:
+              - action: select.select_option
+                target:
+                  entity_id: !input washer_select
+                data:
+                  option: !input run_option
+          - if:
+              - condition: state
+                entity_id: !input dishwasher_remote_control_sensor
+                state: "on"
+            then:
+              - action: select.select_option
+                target:
+                  entity_id: !input dishwasher_select
+                data:
+                  option: !input run_option
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: !input appliance_autostart_cooldown_helper
+            data:
+              timestamp: "{{ now().timestamp() }}"
+        alias: "1. Auto-start washer/dishwasher on high solar export"
+
+      - conditions:
+          - condition: trigger
+            id: forecast_announcement
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ forecast_rest_command not in ['none', ''] }}"
+            then:
+              - action: "rest_command.{{ forecast_rest_command }}"
+                response_variable: forecast_response
+          - variables:
+              forecast_summary: >-
+                {{ forecast_response['content']['text']
+                   if forecast_response is defined and forecast_response['status'] == 200
+                   else "Tomorrow's forecasted energy production is "
+                        ~ states(forecast_announcement_sensor) ~ ' '
+                        ~ state_attr(forecast_announcement_sensor, 'unit_of_measurement') ~ '.' }}
+          - action: "notify.{{ notify_service }}"
+            data:
+              title: "☀️ Solar Forecast"
+              message: "{{ forecast_summary }}{{ forecast_extra_message }}"
+          - if:
+              - condition: template
+                value_template: "{{ announcement_script not in ['none', ''] }}"
+            then:
+              - action: "script.{{ announcement_script }}"
+                data:
+                  announcement_text: "{{ forecast_summary }}{{ forecast_extra_message }}"
+        alias: "2. Nightly forecast announcement"
+
+      - conditions:
+          - condition: trigger
+            id: night_dishwasher
+          - condition: numeric_state
+            entity_id: !input tomorrow_forecast_sensor
+            below: !input low_forecast_threshold
+          - condition: state
+            entity_id: !input dishwasher_remote_control_sensor
+            state: "on"
+        sequence:
+          - delay: !input night_dishwasher_delay
+          - condition: state
+            entity_id: !input dishwasher_remote_control_sensor
+            state: "on"
+          - action: select.select_option
+            target:
+              entity_id: !input dishwasher_select
+            data:
+              option: !input run_option
+        alias: "3. Low-solar-tomorrow overnight dishwasher fallback"
+
+      - conditions:
+          - condition: trigger
+            id: night_washer
+          - condition: numeric_state
+            entity_id: !input tomorrow_forecast_sensor
+            below: !input low_forecast_threshold
+          - condition: state
+            entity_id: !input washer_remote_control_sensor
+            state: "on"
+        sequence:
+          - delay: !input night_washer_delay
+          - condition: state
+            entity_id: !input washer_remote_control_sensor
+            state: "on"
+          - action: select.select_option
+            target:
+              entity_id: !input washer_select
+            data:
+              option: !input run_option
+        alias: "4. Low-solar-tomorrow overnight washer fallback"
+
+      - conditions:
+          - condition: trigger
+            id: [peak_washer, peak_dryer, peak_dishwasher]
+          - condition: numeric_state
+            entity_id: !input electricity_price_sensor
+            above: !input peak_rate_price_threshold
+          - condition: numeric_state
+            entity_id: !input import_power_sensor
+            above: !input peak_rate_import_threshold
+          - condition: template
+            value_template: >
+              {{ states.person | selectattr('entity_id', 'in', peak_rate_persons)
+                                | selectattr('state', 'eq', 'home') | list | length > 0 }}
+        sequence:
+          - variables:
+              appliance_name: >-
+                {% if trigger.id == 'peak_washer' %}washer{% elif trigger.id == 'peak_dryer' %}dryer{% else %}dishwasher{% endif %}
+          - if:
+              - condition: template
+                value_template: "{{ announcement_script not in ['none', ''] }}"
+            then:
+              - action: "script.{{ announcement_script }}"
+                data:
+                  announcement_text: "The {{ appliance_name }} just started on peak rate electricity, pulling from the grid."
+        alias: "5. Peak-rate appliance warning"
+
+      - conditions:
+          - condition: trigger
+            id: high_export_utilization
+          - condition: numeric_state
+            entity_id: !input export_power_sensor
+            above: !input export_threshold
+          - condition: template
+            value_template: >
+              {{ states(export_announcement_cooldown_helper) in ['unknown', 'unavailable']
+                 or (now().timestamp() - (states(export_announcement_cooldown_helper) | as_datetime).timestamp())
+                    > (export_announcement_cooldown_minutes | int) * 60 }}
+          - condition: state
+            entity_id: !input someone_home_sensor
+            state: "on"
+        sequence:
+          - variables:
+              export_kw: "{{ (states(export_power_sensor) | float(0) / 1000) | round(1) }}"
+              washer_ready: "{{ is_state(washer_remote_control_sensor, 'on') }}"
+              dishwasher_ready: "{{ is_state(dishwasher_remote_control_sensor, 'on') }}"
+          - parallel:
+              - if:
+                  - condition: template
+                    value_template: "{{ announcement_script not in ['none', ''] }}"
+                then:
+                  - action: "script.{{ announcement_script }}"
+                    data:
+                      announcement_text: >-
+                        You are currently exporting {{ export_kw }} kilowatts of solar power.
+                        {% if washer_ready and dishwasher_ready %} The washer and dishwasher are ready to start.
+                        {% elif washer_ready %} The washer is ready to start.
+                        {% elif dishwasher_ready %} The dishwasher is ready to start.
+                        {% else %} Consider starting heavy load activities now.
+                        {% endif %}
+              - if:
+                  - condition: template
+                    value_template: "{{ heating_boost_script not in ['none', ''] }}"
+                  - condition: numeric_state
+                    entity_id: !input thermostat
+                    attribute: current_temperature
+                    below: !input heating_boost_min_temp_utilisation
+                  - condition: not
+                    conditions:
+                      - condition: state
+                        entity_id: !input thermostat
+                        attribute: hvac_action
+                        state: heating
+                then:
+                  - action: "script.{{ heating_boost_script }}"
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: !input export_announcement_cooldown_helper
+            data:
+              timestamp: "{{ now().timestamp() }}"
+        alias: "6. High export utilisation announcement (+ optional heating boost)"
+
+      - conditions:
+          - condition: trigger
+            id: heating_high_export
+          - condition: template
+            value_template: "{{ heating_boost_script not in ['none', ''] }}"
+          - condition: template
+            value_template: >
+              {{ states(heating_boost_cooldown_helper) in ['unknown', 'unavailable']
+                 or (now().timestamp() - (states(heating_boost_cooldown_helper) | as_datetime).timestamp())
+                    > (heating_boost_cooldown_minutes | int) * 60 }}
+          - condition: state
+            entity_id: !input someone_home_sensor
+            state: "on"
+          - condition: numeric_state
+            entity_id: !input thermostat
+            attribute: current_temperature
+            below: !input heating_boost_min_temp_direct
+        sequence:
+          - action: "script.{{ heating_boost_script }}"
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: !input heating_boost_cooldown_helper
+            data:
+              timestamp: "{{ now().timestamp() }}"
+        alias: "7. Direct heating boost on sustained high export"
+    default: []
+
+mode: parallel
+max: 10
