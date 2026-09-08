@@ -33,7 +33,7 @@ blueprint:
          just reads a forecast sensor instead.
 
   domain: automation
-  source_url: https://github.com/abz2much/ha-blueprints/blob/main/solar-aware-energy-cluster/solar_aware_energy_cluster.yaml
+  source_url: https://github.com/abz2much/ha-blueprints/blob/master/solar-aware-energy-cluster/solar_aware_energy_cluster.yaml
   homeassistant:
     min_version: "2024.10.0"
 
